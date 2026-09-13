@@ -1,0 +1,52 @@
+[package]
+name    = "mezze-wasm"
+version = "0.1.0"
+
+# Two library entry points, both re-exported to consumers via the
+# package's snake_case module name `mezze_wasm`:
+#   use mezze_wasm::wasm::{ Wasm, GraalWasm, WasmForeign, from_int, from_float }
+#   use mezze_wasm::codec::{ ToWasm, FromWasm, WasmC }
+#
+# ModuleResolver.resolveModuleFile walks `.deps/mezze/mezze_wasm-*/src/`
+# so `mezze_wasm::wasm` resolves to `src/wasm.mz` etc. without any
+# explicit [lib] entry — the search paths already cover the layout.
+
+# ─── polyglot provider ────────────────────────────────────────────
+#
+# Declares this package as the `wasm` polyglot provider.
+#
+# WASM has no package manager: no pip, no npm, no cargo. A `.wasm`
+# binary is a compiled artifact; users typically vendor it in the
+# repo or fetch it themselves at build time. This provider therefore
+# takes the simplest install template that fits the model: a URL-fetch
+# `for` loop that pulls each entry in `[polyglot.wasm].packages` into
+# `.deps/wasm/`. Entries are plain URLs (or `<url>#sha256:<hex>`,
+# with the sha part stripped — kept for parity with `[jars]`).
+#
+# The template requires `curl` on PATH; `sh -c` runs it. Every
+# `.wasm` file lands directly under `{dest}` and is loaded from
+# there via `Wasm.load_file { path = ".deps/wasm/<name>.wasm", ... }`.
+# Users who vendor `.wasm` files locally skip `packages` entirely —
+# nothing runs, no install phase, direct load-by-path works.
+[polyglot.provider]
+language      = "wasm"
+install       = "mkdir -p {dest} && for u in {packages}; do url=${u%%#*}; curl -fL --retry 3 -o {dest}/$(basename \"$url\") \"$url\"; done"
+runtime_env   = "WASM_MODULES_DIR"
+runtime_dir   = ".deps/wasm"
+
+# ─── Maven coordinates ─────────────────────────────────────────────
+#
+# Every entry lands on the wire-child JVM classpath via Aether's
+# resolution into `~/.mezze/cache/maven/`. Transitive deps come
+# along for free (this is why `[maven]` supersedes `[jars]` — no
+# manual sha bookkeeping, real dependency management).
+#
+# Maven Central hosts the GraalWasm jars; the mezze-lang maven repo
+# hosts `polyglot-wasm-natives`. Both are declared below.
+[maven]
+"org.graalvm.wasm:wasm-language"        = "25.0.3"
+"dev.mezze:polyglot-wasm-natives"       = "0.1.0"
+
+[[maven-repo]]
+id  = "mezze-lang"
+url = "https://raw.githubusercontent.com/mezze-lang/mezze-maven/main/"

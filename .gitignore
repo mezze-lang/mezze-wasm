@@ -1,0 +1,5 @@
+.deps/
+.build/
+.mez/
+Mezze.lock
+*.log
