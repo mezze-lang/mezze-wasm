@@ -108,6 +108,63 @@ impl WasmForeign where {
   type_name = { it } -> __native_polyglot_type_name  { val = it },
 }
 
+## Chainable inherent methods on `Result WasmForeign InteropError` —
+## the exact return type of every fallible operation above. Mirrors
+## every method on `impl WasmForeign` so users can write
+##
+##     let sum = Wasm.load_file { path = "add.wasm", name = "add" }
+##                 .get_export { name = "add" }
+##                 .call { args = [from_int { val = 2 }, from_int { val = 3 }] }
+##                 .as_int {}
+##
+## without a `match` between every step. Each method threads through
+## the Result: on `Ok` it delegates to the underlying `WasmForeign`
+## method; on `Err` it propagates unchanged.
+##
+## The generic `impl Result 'a 'e` (map / get_or / flat_map / …) still
+## applies — this block just adds the wasm-idiomatic vocabulary on top
+## for the concrete `Result WasmForeign InteropError` type.
+impl Result WasmForeign InteropError where {
+  ## ---- Exports ----
+
+  get_export = { it, name } -> match it is
+    Ok  { val = f } -> f.get_export { name = name }
+    Err { error }   -> Err { error = error },
+  call = { it, args } -> match it is
+    Ok  { val = f } -> f.call { args = args }
+    Err { error }   -> Err { error = error },
+  call_export = { it, name, args } -> match it is
+    Ok  { val = f } -> f.call_export { name = name, args = args }
+    Err { error }   -> Err { error = error },
+
+  ## ---- Linear memory ----
+
+  memory_read = { it, offset, length } -> match it is
+    Ok  { val = f } -> f.memory_read { offset = offset, length = length }
+    Err { error }   -> Err { error = error },
+  memory_write = { it, offset, bytes } -> match it is
+    Ok  { val = f } -> f.memory_write { offset = offset, bytes = bytes }
+    Err { error }   -> Err { error = error },
+  memory_size = { it } -> match it is
+    Ok  { val = f } -> f.memory_size {}
+    Err { error }  -> Err { error = error },
+
+  ## ---- Universal vocabulary (numeric + null + meta) ----
+
+  as_int = { it } -> match it is
+    Ok  { val = f } -> f.as_int {}
+    Err { error }  -> Err { error = error },
+  as_float = { it } -> match it is
+    Ok  { val = f } -> f.as_float {}
+    Err { error }  -> Err { error = error },
+  is_null = { it } -> match it is
+    Ok  { val = f } -> Ok { val = f.is_null {} }
+    Err { error }  -> Err { error = error },
+  type_name = { it } -> match it is
+    Ok  { val = f } -> Ok { val = f.type_name {} }
+    Err { error }  -> Err { error = error },
+}
+
 ## Constructors — lift a Mezze numeric primitive into a WasmForeign
 ## so it can be passed as an argument to `.call{}` / `.call_export{}`.
 ## Wasm has no native string / bool boundary types, so those
