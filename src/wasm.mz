@@ -155,7 +155,11 @@ impl Result WasmForeign InteropError where {
 ## f64 that GraalWasm narrows to f32 where a signature calls for it. Both go through
 ## the `Polyglot` effect with the guest id "wasm" baked in here. Wasm has no native
 ## string / bool boundary type, so those constructors are deliberately absent.
-pub let from_int:   { val: Int   } -> WasmForeign = { val } ->
+## `<*>`: these bury `perform Runtime` (a provider can't call natives), so their
+## bodies handle an effect and the annotation must say so — a caller can't tell a
+## fully-discharged body from a pure one otherwise. Use them inside a function
+## (module-top-level effectful bindings are rejected).
+pub let from_int:   { val: Int   } -> WasmForeign <*> = { val } ->
   perform Runtime in Polyglot.box_i32   { val = val, lang = "wasm" }
-pub let from_float: { val: Float } -> WasmForeign = { val } ->
+pub let from_float: { val: Float } -> WasmForeign <*> = { val } ->
   perform Runtime in Polyglot.box_float { val = val, lang = "wasm" }
