@@ -1,6 +1,6 @@
 [package]
 name    = "mezze-wasm"
-version = "0.2.0"
+version = "0.3.0"
 
 # Two library entry points, both re-exported to consumers via the
 # package's snake_case module name `mezze_wasm`:
@@ -41,12 +41,11 @@ runtime_dir   = ".deps/wasm"
 # along for free (this is why `[maven]` supersedes `[jars]` — no
 # manual sha bookkeeping, real dependency management).
 #
-# Maven Central hosts the GraalWasm jars; the mezze-lang maven repo
-# hosts `polyglot-wasm-natives`. Both are declared below.
+# Only the GraalWasm language jar — this package ships NO natives of its own.
+# As of 0.3.0 all interop goes through the first-party `Polyglot` effect in
+# `std::polyglot::core` (handled by `Runtime`, the sole native caller), using the
+# generic `eval_bytes` / `read_bytes` / `write_bytes` / `box_i32` ops, so the old
+# `dev.mezze:polyglot-wasm-natives` plugin jar is gone and with it the dependency
+# on the mezze-lang maven repo.
 [maven]
 "org.graalvm.wasm:wasm-language"        = "25.0.3"
-"dev.mezze:polyglot-wasm-natives"       = "0.1.0"
-
-[[maven-repo]]
-id  = "mezze-lang"
-url = "https://raw.githubusercontent.com/mezze-lang/mezze-maven/main/"

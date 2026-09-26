@@ -30,6 +30,7 @@ use std::codec::core::{
 use mezze_wasm::wasm::{ WasmForeign, from_int, from_float }
 use std::char
 use std::float
+use std::frac
 use std::int
 use std::nat
 
@@ -64,7 +65,7 @@ impl EncodeScalar for WasmC having 'out = WasmForeign where {
   encode_float = { it, val, ctx } -> from_float { val = val },
   encode_str   = { it, val, ctx } -> from_int   { val = 0 },
   encode_bool  = { it, val, ctx } -> from_int   { val = if val then 1 else 0 },
-  encode_frac  = { it, val, ctx } -> from_float { val = __native_frac_to_float { n = val } },
+  encode_frac  = { it, val, ctx } -> from_float { val = frac::to_float { n = val } },
   encode_bytes = { it, val, ctx } -> from_int   { val = 0 },
   encode_char  = { it, val, ctx } -> from_int   { val = char::to_int { c = val } },
   encode_nat   = { it, val, ctx } -> from_int   { val = nat::to_int { n = val } },
@@ -104,7 +105,14 @@ impl DecodeScalar for WasmC having 'in = WasmForeign where {
       found = Some { val = val.type_name{} },
     },
   decode_frac = { it, val, ctx } -> match val.as_float{} is
-    Ok { val = f } -> Ok { val = __native_float_to_frac { f = f } }
+    Ok { val = f } -> match frac::from_float { f = f } is
+      Some { val = fr } -> Ok { val = fr }
+      None -> decode_error {
+        path = ctx.path,
+        message = "Float is not a finite rational (NaN or infinity)",
+        expected = "Frac",
+        found = Some { val = val.type_name{} },
+      }
     Err { error = _ } -> decode_error {
       path = ctx.path,
       message = "Expected Foreign coercible to Frac",

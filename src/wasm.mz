@@ -1,132 +1,122 @@
 # WebAssembly host-language access (GraalWasm).
 #
-# WebAssembly's interop model is deliberately narrow: a wasm module is
-# a compiled binary blob with named function/memory/global/table
-# exports, and every value crossing the boundary is a numeric primitive
-# (i32, i64, f32, f64). There is no source-level `eval`, no OOP, no
-# per-object methods — everything is a top-level export.
+# WebAssembly's interop model is deliberately narrow: a wasm module is a compiled
+# binary blob with named function/memory/global/table exports, and every value
+# crossing the boundary is a numeric primitive (i32, i64, f32, f64). There is no
+# source-level `eval`, no OOP, no per-object methods — everything is a top-level
+# export.
 #
-# The Mezze surface mirrors that shape: `perform GraalWasm in do ...`
-# yields `Wasm.load_module` / `Wasm.load_file`, which return a
-# `WasmForeign` wrapping the compiled module instance. From there the
-# inherent methods on `WasmForeign` give you `get_export`, `call`,
-# `call_export`, and byte-oriented linear-memory access.
+# THIS PACKAGE WRITES NO NATIVES. Like the Python and JS providers, every op
+# delegates to the first-party `Polyglot` effect in `std::polyglot::core` (handled
+# by `Runtime`, the sole native caller). Wasm needs three ops beyond the shared
+# value verbs — all generic, all in core: `eval_bytes` (binary module compile),
+# `read_bytes`/`write_bytes` (bulk linear-memory copy), and `box_i32` (the i32
+# ABI). Each verb buries its own `perform Runtime`, so a user calls
+# `mod.call_export{}` with no enclosing perform and never sees a `Polyglot.*` op
+# or the "wasm" guest id (baked in once, at the entry points).
 #
-# Because wasm cannot represent strings/records/lists/variants natively,
-# the codec surface (`mezze_wasm::codec`) is limited to scalar numeric
-# encode/decode — records / collections must be marshalled by the caller
-# through linear memory using the memory_read / memory_write primitives.
-use std::polyglot::core::{ InteropError }
+# `load_module` composes in pure Mezze what the old native did in one step:
+# `eval_bytes` (compile) then `instantiate` then read the `exports` member.
+#
+# Loading a module FROM A FILE is intentionally not a Wasm op: reading a file is a
+# FileSystem capability, orthogonal to wasm. A caller reads bytes with
+# `std::effects::filesystem` (which they already hold) and passes them to
+# `load_module` — keeping the Wasm effect row clean.
+#
+# Because wasm cannot represent strings/records/lists/variants natively, the codec
+# surface (`mezze_wasm::codec`) is limited to scalar numeric encode/decode.
+use std::polyglot::core::{ InteropError, Polyglot, Runtime, Foreign }
 
-## Opaque handle to a wasm module instance or exported value (function,
-## memory, global). Runtime: the same `MezzeForeign` Java class every
-## language uses; the newtype gives Mezze-level type safety against
-## mixing wasm and non-wasm Foreigns.
-pub newtype WasmForeign = __NativeForeign
+## Opaque handle to a wasm module instance or exported value (function, memory,
+## global). Wraps the public `Foreign` handle (never the internal native
+## primitive); the newtype gives Mezze-level type safety against mixing wasm and
+## non-wasm Foreigns.
+pub newtype WasmForeign = Foreign
 
-## WebAssembly host effect. Two module-loading paths are exposed:
-## `load_module` accepts a raw byte buffer (the caller compiled or
-## fetched the wasm binary themselves), and `load_file` reads from
-## the local filesystem via the Context's IO policy. Both return the
-## compiled module instance — its exports are reachable via
+## WebAssembly host effect. `load_module` accepts a raw wasm binary and returns the
+## instantiated module's `exports` namespace — every export is reachable via
 ## `get_export` / `call_export`.
 effect Wasm where {
   load_module: { bytes: Bytes, name: Str } -> Result WasmForeign InteropError <Wasm>,
-  load_file:   { path: Str,   name: Str } -> Result WasmForeign InteropError <Wasm>,
 }
 
-## Default WebAssembly host — routes all ops through the ambient
-## Truffle Env's GraalWasm interpreter. Zero-field: the polyglot
-## Context is managed by the runtime from `Mezze.toml [polyglot.wasm]`;
-## the handler carries no user-visible configuration.
+## Default WebAssembly host — routes through the ambient Truffle Env's GraalWasm
+## interpreter. Zero-field: the polyglot Context is managed by the runtime from
+## `Mezze.toml [polyglot.wasm]`; the handler carries no user-visible configuration.
 pub type GraalWasm = {}
 
 impl Wasm for GraalWasm where {
-  load_module = { bytes, name } -> __native_wasm_load_module { bytes = bytes, name = name },
-  load_file   = { path,  name } -> __native_wasm_load_file   { path  = path,  name = name },
+  ## Compile → instantiate → read `exports`, all via the shared Polyglot effect.
+  ## "wasm" is baked here (the one entry point).
+  load_module = { bytes, name } -> perform Runtime in do
+    match Polyglot.eval_bytes { lang = "wasm", bytes = bytes, name = name } is
+      Ok  { val = module } -> match Polyglot.instantiate { on = module, args = [] } is
+        Ok  { val = instance } -> Polyglot.read_member { on = instance, name = "exports" }
+        Err { error } -> Err { error = error }
+      Err { error } -> Err { error = error },
 }
 
-## Inherent methods on WasmForeign — the wasm-idiomatic vocabulary
-## plus the small universal InteropLibrary surface that makes sense
-## for wasm (numeric coercion + null / type inspection). Every op
-## routes through the same `__native_polyglot_*` / `__native_wasm_*`
-## natives every language shares.
+## Inherent methods on WasmForeign — the wasm-idiomatic vocabulary plus the small
+## universal surface that makes sense for wasm. Every verb buries its own
+## `perform Runtime`, so chains run with no enclosing perform.
 impl WasmForeign where {
   ## ---- Exports ----
 
   ## Look up an exported function / memory / global by name.
-  ## Returns the export itself as a `WasmForeign` — a function is
-  ## executable via `.call{}`, memory is byte-addressable via
-  ## `.memory_read{}` / `.memory_write{}`, a global is a numeric
-  ## coercible via `.as_int{}` / `.as_float{}`.
   get_export = { it, name } ->
-    __native_wasm_get_export { val = it, name = name },
+    perform Runtime in Polyglot.read_member { on = it, name = name },
 
-  ## Invoke a callable Foreign (typically an exported function) with
-  ## a list of numeric-primitive arguments. Wasm accepts only i32,
-  ## i64, f32, f64 — the caller must lift Mezze scalars through
-  ## `from_int` / `from_float` before passing.
+  ## Invoke a callable Foreign (typically an exported function) with a list of
+  ## numeric-primitive arguments (lift Mezze scalars via `from_int` / `from_float`).
   call = { it, args } ->
-    __native_polyglot_execute { val = it, args = args },
+    perform Runtime in Polyglot.execute { on = it, args = args },
 
   ## Convenience: look up an export by name AND invoke it in one call.
-  ## Fast path for the common case `module.call_export { name = "f", args = [...] }`.
-  call_export = { it, name, args } -> match __native_wasm_get_export { val = it, name = name } is
-    Ok { val = f } -> __native_polyglot_execute { val = f, args = args }
-    Err { error } -> Err { error = error },
+  call_export = { it, name, args } -> perform Runtime in do
+    match Polyglot.read_member { on = it, name = name } is
+      Ok  { val = f } -> Polyglot.execute { on = f, args = args }
+      Err { error } -> Err { error = error },
 
   ## ---- Linear memory ----
 
-  ## Read `length` bytes from linear memory starting at `offset`.
-  ## The receiver must be the module's memory export (typically
-  ## `module.get_export { name = "memory" }`). Errors on out-of-range.
+  ## Read `length` bytes from linear memory starting at `offset`. The receiver must
+  ## be the module's memory export (typically `module.get_export { name = "memory" }`).
   memory_read = { it, offset, length } ->
-    __native_wasm_memory_read { val = it, offset = offset, length = length },
+    perform Runtime in Polyglot.read_bytes { on = it, offset = offset, length = length },
 
-  ## Write a byte buffer into linear memory at `offset`. The receiver
-  ## must be a writable memory export. Errors on out-of-range.
+  ## Write a byte buffer into linear memory at `offset`. The receiver must be a
+  ## writable memory export. Errors on out-of-range.
   memory_write = { it, offset, bytes } ->
-    __native_wasm_memory_write { val = it, offset = offset, bytes = bytes },
+    perform Runtime in Polyglot.write_bytes { on = it, offset = offset, bytes = bytes },
 
-  ## Total size (in bytes) of a memory export. Wasm memory grows in
-  ## 64 KiB pages; this returns the current byte count, not the page
-  ## count.
+  ## Total size (in bytes) of a memory export.
   memory_size = { it } ->
-    __native_wasm_memory_size { val = it },
+    perform Runtime in Polyglot.size { on = it },
 
   ## ---- Universal vocabulary (numeric + null + meta) ----
 
   ## Coerce a numeric Foreign to Int.
-  as_int    = { it } -> __native_polyglot_as_long    { val = it },
+  as_int    = { it } -> perform Runtime in Polyglot.as_int    { on = it },
   ## Coerce a numeric Foreign to Float.
-  as_float  = { it } -> __native_polyglot_as_double  { val = it },
-  ## True iff this Foreign is the guest-language null. Wasm has no
-  ## native null but the InteropLibrary predicate is universally safe.
-  is_null   = { it } -> __native_polyglot_is_null    { val = it },
-  ## Debug name of the underlying wasm type (function, memory,
-  ## global, table, i32, f64, …).
-  type_name = { it } -> __native_polyglot_type_name  { val = it },
+  as_float  = { it } -> perform Runtime in Polyglot.as_float  { on = it },
+  ## True iff this Foreign is the guest-language null.
+  is_null   = { it } -> perform Runtime in Polyglot.is_null   { on = it },
+  ## Debug name of the underlying wasm type (function, memory, global, i32, f64, …).
+  type_name = { it } -> perform Runtime in Polyglot.type_name { on = it },
 }
 
-## Chainable inherent methods on `Result WasmForeign InteropError` —
-## the exact return type of every fallible operation above. Mirrors
-## every method on `impl WasmForeign` so users can write
+## Chainable inherent methods on `Result WasmForeign InteropError` — the return
+## type of every fallible operation above — so a pipeline reads as a flat chain
 ##
-##     let sum = Wasm.load_file { path = "add.wasm", name = "add" }
-##                 .get_export { name = "add" }
-##                 .call { args = [from_int { val = 2 }, from_int { val = 3 }] }
-##                 .as_int {}
+##     Wasm.load_module { bytes = wasm, name = "add" }
+##       .get_export { name = "add" }
+##       .call { args = [from_int { val = 2 }, from_int { val = 3 }] }
+##       .as_int {}
 ##
-## without a `match` between every step. Each method threads through
-## the Result: on `Ok` it delegates to the underlying `WasmForeign`
-## method; on `Err` it propagates unchanged.
-##
-## The generic `impl Result 'a 'e` (map / get_or / flat_map / …) still
-## applies — this block just adds the wasm-idiomatic vocabulary on top
-## for the concrete `Result WasmForeign InteropError` type.
+## with no `match` between steps. On `Ok` it delegates to the underlying
+## `WasmForeign`; on `Err` it propagates unchanged. The generic `impl Result 'a 'e`
+## (map / get_or / flat_map / …) still applies on top.
 impl Result WasmForeign InteropError where {
-  ## ---- Exports ----
-
   get_export = { it, name } -> match it is
     Ok  { val = f } -> f.get_export { name = name }
     Err { error }   -> Err { error = error },
@@ -136,9 +126,6 @@ impl Result WasmForeign InteropError where {
   call_export = { it, name, args } -> match it is
     Ok  { val = f } -> f.call_export { name = name, args = args }
     Err { error }   -> Err { error = error },
-
-  ## ---- Linear memory ----
-
   memory_read = { it, offset, length } -> match it is
     Ok  { val = f } -> f.memory_read { offset = offset, length = length }
     Err { error }   -> Err { error = error },
@@ -148,9 +135,6 @@ impl Result WasmForeign InteropError where {
   memory_size = { it } -> match it is
     Ok  { val = f } -> f.memory_size {}
     Err { error }  -> Err { error = error },
-
-  ## ---- Universal vocabulary (numeric + null + meta) ----
-
   as_int = { it } -> match it is
     Ok  { val = f } -> f.as_int {}
     Err { error }  -> Err { error = error },
@@ -165,11 +149,13 @@ impl Result WasmForeign InteropError where {
     Err { error }  -> Err { error = error },
 }
 
-## Constructors — lift a Mezze numeric primitive into a WasmForeign
-## so it can be passed as an argument to `.call{}` / `.call_export{}`.
-## Wasm has no native string / bool boundary types, so those
-## constructors are deliberately absent — a caller who needs to hand
-## structured data to a wasm module writes it into linear memory and
-## passes the offset as an Int.
-pub let from_int:   { val: Int   } -> WasmForeign = { val } -> __native_wasm_from_int   { val = val }
-pub let from_float: { val: Float } -> WasmForeign = { val } -> __native_wasm_from_float { val = val }
+## Constructors — lift a Mezze numeric primitive into a WasmForeign so it can be
+## passed to `.call{}` / `.call_export{}`. `from_int` mints a 32-bit i32 (wasm's
+## function ABI rejects a 64-bit Long for an i32 parameter); `from_float` mints an
+## f64 that GraalWasm narrows to f32 where a signature calls for it. Both go through
+## the `Polyglot` effect with the guest id "wasm" baked in here. Wasm has no native
+## string / bool boundary type, so those constructors are deliberately absent.
+pub let from_int:   { val: Int   } -> WasmForeign = { val } ->
+  perform Runtime in Polyglot.box_i32   { val = val, lang = "wasm" }
+pub let from_float: { val: Float } -> WasmForeign = { val } ->
+  perform Runtime in Polyglot.box_float { val = val, lang = "wasm" }
