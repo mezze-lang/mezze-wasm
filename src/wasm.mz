@@ -43,8 +43,7 @@ effect Wasm where {
 ## Default WebAssembly host — routes through the ambient Truffle Env's GraalWasm
 ## interpreter. Zero-field: the polyglot Context is managed by the runtime from
 ## `Mezze.toml [polyglot.wasm]`; the handler carries no user-visible configuration.
-pub type GraalWasm = {}
-
+## The handler type is introduced by the impl itself — no separate `type` needed.
 impl Wasm for GraalWasm where {
   ## Compile → instantiate → read `exports`, all via the shared Polyglot effect.
   ## "wasm" is baked here (the one entry point).
