@@ -25,7 +25,7 @@
 #
 # Because wasm cannot represent strings/records/lists/variants natively, the codec
 # surface (`mezze_wasm::codec`) is limited to scalar numeric encode/decode.
-use std::polyglot::core::{ InteropError, Polyglot, Runtime, Foreign }
+use std::polyglot::core::{ InteropError, Polyglot, Runtime, Foreign, lift }
 
 ## Opaque handle to a wasm module instance or exported value (function, memory,
 ## global). Wraps the public `Foreign` handle (never the internal native
@@ -46,13 +46,20 @@ effect Wasm where {
 ## The handler type is introduced by the impl itself — no separate `type` needed.
 impl Wasm for GraalWasm where {
   ## Compile → instantiate → read `exports`, all via the shared Polyglot effect.
-  ## "wasm" is baked here (the one entry point).
-  load_module = { bytes, name } -> perform Runtime in do
-    match Polyglot.eval_bytes { lang = "wasm", bytes = bytes, name = name } is
-      Ok  { val = module } -> match Polyglot.instantiate { on = module, args = [] } is
-        Ok  { val = instance } -> Polyglot.read_member { on = instance, name = "exports" }
-        Err { error } -> Err { error = error }
-      Err { error } -> Err { error = error },
+  ## "wasm" is baked here (the one entry point). `eval_bytes`, `instantiate`, and
+  ## `read_member` are all producers yielding a bare error-carrying foreign, so they
+  ## chain directly on the foreign; `lift` materializes the single `Result` the
+  ## entry point promises (an error anywhere in the chain surfaces at the `lift`).
+  load_module = { bytes, name } -> perform Runtime in
+    lift {
+      on = Polyglot.read_member {
+        on = Polyglot.instantiate {
+          on = Polyglot.eval_bytes { lang = "wasm", bytes = bytes, name = name },
+          args = [],
+        },
+        name = "exports",
+      },
+    },
 }
 
 ## Inherent methods on WasmForeign — the wasm-idiomatic vocabulary plus the small
@@ -70,11 +77,11 @@ impl WasmForeign where {
   call = { it, args } ->
     perform Runtime in Polyglot.execute { on = it, args = args },
 
-  ## Convenience: look up an export by name AND invoke it in one call.
-  call_export = { it, name, args } -> perform Runtime in do
-    match Polyglot.read_member { on = it, name = name } is
-      Ok  { val = f } -> Polyglot.execute { on = f, args = args }
-      Err { error } -> Err { error = error },
+  ## Convenience: look up an export by name AND invoke it in one call. Both steps
+  ## are producers yielding a bare error-carrying foreign, so the lookup chains
+  ## straight into the call — a missing export surfaces as an errored foreign.
+  call_export = { it, name, args } -> perform Runtime in
+    Polyglot.execute { on = Polyglot.read_member { on = it, name = name }, args = args },
 
   ## ---- Linear memory ----
 
@@ -116,20 +123,25 @@ impl WasmForeign where {
 ## `WasmForeign`; on `Err` it propagates unchanged. The generic `impl Result 'a 'e`
 ## (map / get_or / flat_map / …) still applies on top.
 impl Result WasmForeign InteropError where {
+  # ---- producer verbs: the bare `WasmForeign` form yields an error-carrying
+  # foreign, so on `Ok` we `lift` that foreign back into a `Result` (the chain
+  # stays a `Result` for the next step); on `Err` the earlier error propagates. ----
   get_export = { it, name } -> match it is
-    Ok  { val = f } -> f.get_export { name = name }
+    Ok  { val = f } -> perform Runtime in lift { on = f.get_export { name = name } }
     Err { error }   -> Err { error = error },
   call = { it, args } -> match it is
-    Ok  { val = f } -> f.call { args = args }
+    Ok  { val = f } -> perform Runtime in lift { on = f.call { args = args } }
     Err { error }   -> Err { error = error },
   call_export = { it, name, args } -> match it is
-    Ok  { val = f } -> f.call_export { name = name, args = args }
-    Err { error }   -> Err { error = error },
-  memory_read = { it, offset, length } -> match it is
-    Ok  { val = f } -> f.memory_read { offset = offset, length = length }
+    Ok  { val = f } -> perform Runtime in lift { on = f.call_export { name = name, args = args } }
     Err { error }   -> Err { error = error },
   memory_write = { it, offset, bytes } -> match it is
-    Ok  { val = f } -> f.memory_write { offset = offset, bytes = bytes }
+    Ok  { val = f } -> perform Runtime in lift { on = f.memory_write { offset = offset, bytes = bytes } }
+    Err { error }   -> Err { error = error },
+  # ---- crossing verbs: the bare form ALREADY yields a `Result X InteropError`,
+  # so on `Ok` we forward it verbatim (no extra `Ok {}` wrap); `Err` propagates. ----
+  memory_read = { it, offset, length } -> match it is
+    Ok  { val = f } -> f.memory_read { offset = offset, length = length }
     Err { error }   -> Err { error = error },
   memory_size = { it } -> match it is
     Ok  { val = f } -> f.memory_size {}
@@ -141,10 +153,10 @@ impl Result WasmForeign InteropError where {
     Ok  { val = f } -> f.as_float {}
     Err { error }  -> Err { error = error },
   is_null = { it } -> match it is
-    Ok  { val = f } -> Ok { val = f.is_null {} }
+    Ok  { val = f } -> f.is_null {}
     Err { error }  -> Err { error = error },
   type_name = { it } -> match it is
-    Ok  { val = f } -> Ok { val = f.type_name {} }
+    Ok  { val = f } -> f.type_name {}
     Err { error }  -> Err { error = error },
 }
 
