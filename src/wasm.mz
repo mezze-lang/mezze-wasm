@@ -109,6 +109,10 @@ impl WasmForeign where {
   is_null   = { it } -> perform Runtime in Polyglot.is_null   { on = it },
   ## Debug name of the underlying wasm type (function, memory, global, i32, f64, …).
   type_name = { it } -> perform Runtime in Polyglot.type_name { on = it },
+  ## Presence/liveness probe: `Ok {}` if the foreign is live, `Err` if it carries an
+  ## error (an out-of-range export, a failed memory write). Surfaces a FLUENT
+  ## producer's success without extracting a value — `mem.memory_write{}.check{}`.
+  check     = { it } -> perform Runtime in Polyglot.check { on = it },
 }
 
 ## Chainable inherent methods on `Result WasmForeign InteropError` — the return
@@ -157,6 +161,9 @@ impl Result WasmForeign InteropError where {
     Err { error }  -> Err { error = error },
   type_name = { it } -> match it is
     Ok  { val = f } -> f.type_name {}
+    Err { error }  -> Err { error = error },
+  check = { it } -> match it is
+    Ok  { val = f } -> f.check {}
     Err { error }  -> Err { error = error },
 }
 
