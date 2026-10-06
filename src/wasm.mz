@@ -62,6 +62,37 @@ impl Wasm for GraalWasm where {
     },
 }
 
+## Sandboxed WebAssembly host — the SAME `Wasm` effect as `GraalWasm`, but the module
+## compiles and runs in an isolated INNER context. `perform GraalWasmWith { config }
+## in do …` IS the isolation boundary: `initialize_scope` opens the context (handle
+## bound to `scope`), `finalize_scope` closes it. `load_module` compiles IN the scope
+## via `eval_bytes_in`; the exports foreign and every `.call_export{}` chain off it
+## stay in that context until it closes. User code writes only `Wasm.*`;
+## `Polyglot`/`Runtime`/`"wasm"` stay buried. `config` is a structural record (not a
+## nominal type); spread `wasm_defaults` and override the knobs you want to deny.
+impl Wasm for GraalWasmWith { config: { allow_io: Bool, allow_native: Bool, allow_create_thread: Bool, allow_create_process: Bool, allow_host_class_loading: Bool, allow_host_lookup: Bool, allow_polyglot_access: Bool } } where {
+  initialize_scope = {} -> perform Runtime in Polyglot.open_context { lang = "wasm", config = config },
+  finalize_scope = {} -> do
+    let _ = perform Runtime in Polyglot.close_context { ctx = scope }
+    {},
+  load_module = { bytes, name } -> perform Runtime in
+    lift {
+      on = Polyglot.read_member {
+        on = Polyglot.instantiate {
+          on = Polyglot.eval_bytes_in { ctx = scope, bytes = bytes, name = name },
+          args = [],
+        },
+        name = "exports",
+      },
+    },
+}
+
+## Default `Context.Builder` policy for `GraalWasmWith` — PERMISSIVE (matches ambient
+## `GraalWasm`). Sandboxing is OPT-IN: spread and deny, e.g.
+## `GraalWasmWith { config = { ...wasm_defaults, allow_io = False } }`.
+pub let wasm_defaults: { allow_io: Bool, allow_native: Bool, allow_create_thread: Bool, allow_create_process: Bool, allow_host_class_loading: Bool, allow_host_lookup: Bool, allow_polyglot_access: Bool } =
+  { allow_io = True, allow_native = True, allow_create_thread = True, allow_create_process = True, allow_host_class_loading = True, allow_host_lookup = True, allow_polyglot_access = True }
+
 ## Inherent methods on WasmForeign — the wasm-idiomatic vocabulary plus the small
 ## universal surface that makes sense for wasm. Every verb buries its own
 ## `perform Runtime`, so chains run with no enclosing perform.
