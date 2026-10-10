@@ -132,10 +132,11 @@ impl WasmForeign where {
 
   ## ---- Universal vocabulary (numeric + null + meta) ----
 
-  ## Coerce a numeric Foreign to Int.
-  as_int    = { it } -> perform Runtime in Polyglot.as_int    { on = it },
+  ## Coerce a numeric Foreign to Int. (Named `int` to match js/python/jvm — the
+  ## verb set reads uniformly across every provider.)
+  int       = { it } -> perform Runtime in Polyglot.as_int    { on = it },
   ## Coerce a numeric Foreign to Float.
-  as_float  = { it } -> perform Runtime in Polyglot.as_float  { on = it },
+  float     = { it } -> perform Runtime in Polyglot.as_float  { on = it },
   ## True iff this Foreign is the guest-language null.
   is_null   = { it } -> perform Runtime in Polyglot.is_null   { on = it },
   ## Debug name of the underlying wasm type (function, memory, global, i32, f64, …).
@@ -152,7 +153,7 @@ impl WasmForeign where {
 ##     Wasm.load_module { bytes = wasm, name = "add" }
 ##       .get_export { name = "add" }
 ##       .call { args = [from_int { val = 2 }, from_int { val = 3 }] }
-##       .as_int {}
+##       .int {}
 ##
 ## with no `match` between steps. On `Ok` it delegates to the underlying
 ## `WasmForeign`; on `Err` it propagates unchanged. The generic `impl Result 'a 'e`
@@ -181,11 +182,11 @@ impl Result WasmForeign InteropError where {
   memory_size = { it } -> match it is
     Ok  { val = f } -> f.memory_size {}
     Err { error }  -> Err { error = error },
-  as_int = { it } -> match it is
-    Ok  { val = f } -> f.as_int {}
+  int = { it } -> match it is
+    Ok  { val = f } -> f.int {}
     Err { error }  -> Err { error = error },
-  as_float = { it } -> match it is
-    Ok  { val = f } -> f.as_float {}
+  float = { it } -> match it is
+    Ok  { val = f } -> f.float {}
     Err { error }  -> Err { error = error },
   is_null = { it } -> match it is
     Ok  { val = f } -> f.is_null {}
