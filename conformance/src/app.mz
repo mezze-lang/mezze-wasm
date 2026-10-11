@@ -1,0 +1,161 @@
+# Conformance harness for the mezze-wasm provider.
+#
+# Two layers, one program (see the mezze-js conformance harness for the full
+# rationale — this is the WebAssembly instantiation of the same two-layer
+# contract, over wasm's deliberately narrow numeric + linear-memory boundary):
+#
+#   1. TYPE-LEVEL (mez check, no guest runtime). `verb_coverage` references
+#      every WasmForeign verb and both numeric constructors; `main` calls each
+#      crossing verb on a Result-typed receiver. The whole surface AND the
+#      `impl Result WasmForeign InteropError` mirror must compile — a producer
+#      verb that forgets `lift` cannot launder a bare foreign into a Result
+#      (the toolchain's #22 gate). So `mez check` alone is a conformance gate.
+#
+#   2. BEHAVIOURAL (mez dev --no-watch, needs GraalWasm). `main` compiles a
+#      hand-assembled module, invokes its exports, round-trips bytes through
+#      linear memory, and boots a GraalWasmWith sandbox — exit non-zero on any
+#      failed check.
+use std::effects::log::{ println, Console, Log }
+use std::effects::process::{ exit, SystemProcess }
+use std::polyglot::core::{ InteropError }
+use std::collections::bytes
+use mezze_wasm::wasm::{ Wasm, GraalWasm, GraalWasmWith, WasmForeign, wasm_defaults, from_int, from_float }
+use std::int
+
+## ── Layer 1: type-level verb coverage ───────────────────────────────────────
+let verb_coverage: { x: WasmForeign } -> {}
+  = { x } -> do
+    # producer verbs — bare WasmForeign -> WasmForeign (chainable)
+    let _ = x.get_export { name = "e" }
+    let _ = x.call { args = [x] }
+    let _ = x.call_export { name = "e", args = [x] }
+    let _ = x.memory_write { offset = 0, bytes = bytes::empty {} }
+    # crossing verbs — WasmForeign -> Result ... InteropError
+    let _ = x.memory_read { offset = 0, length = 0 }
+    let _ = x.memory_size {}
+    let _ = x.int {}
+    let _ = x.float {}
+    let _ = x.is_null {}
+    let _ = x.type_name {}
+    let _ = x.check {}
+    {}
+
+## Constructor coverage — wasm's numeric-only lift surface.
+let ctor_coverage: {} -> [WasmForeign] <*>
+  = {} -> [from_int { val = 1 }, from_float { val = 1.0 }]
+
+## The hand-assembled 85-byte module from the polyglot_wasm example: exports
+## add / mul / sub : (i32, i32) -> i32 and one page of linear memory.
+let module_hex: Str = "0061736D0100000001070160027F7F017F0304030000000503010001071C04036164640000036D756C0001037375620002066D656D6F72790200"
+let module_hex_code: Str = "0A19030700200020016A0B0700200020016C0B0700200020016B0B"
+
+let module_bytes: {} -> Bytes = {} -> match bytes::from_hex { s = "$(module_hex)$(module_hex_code)" } is
+  Some { val = b } -> b
+  None -> bytes::empty {}
+
+## ── Layer 2: behavioural checks ─────────────────────────────────────────────
+let pass: { label: Str } -> Int <Log>
+  = { label } -> do
+    let _ = println { msg = "  ok    $(label)" }
+    0
+
+let fail: { label: Str, detail: Str } -> Int <Log>
+  = { label, detail } -> do
+    let _ = println { msg = "  FAIL  $(label): $(detail)" }
+    1
+
+let want_int: { label: Str, got: Result Int InteropError, want: Int } -> Int <Log>
+  = { label, got, want } -> match got is
+    Ok { val = n } ->
+      if n == want then pass { label = label }
+      else fail { label = label, detail = "got $(int::to_str { n = n }), want $(int::to_str { n = want })" }
+    Err { error = _ } -> fail { label = label, detail = "guest error" }
+
+let want_str: { label: Str, got: Result Str InteropError, want: Str } -> Int <Log>
+  = { label, got, want } -> match got is
+    Ok { val = s } ->
+      if s == want then pass { label = label }
+      else fail { label = label, detail = "got '$(s)', want '$(want)'" }
+    Err { error = _ } -> fail { label = label, detail = "guest error" }
+
+let want_ok: { label: Str, got: Result {} InteropError } -> Int <Log>
+  = { label, got } -> match got is
+    Ok { val = _ } -> pass { label = label }
+    Err { error = _ } -> fail { label = label, detail = "expected Ok, got Err" }
+
+let want_err: { label: Str, got: Result Int InteropError } -> Int <Log>
+  = { label, got } -> match got is
+    Ok { val = _ } -> fail { label = label, detail = "expected Err, got Ok" }
+    Err { error = _ } -> pass { label = label }
+
+## Arithmetic exports + linear-memory round-trip + the error model, parameterised
+## over the active `Wasm` handler so the SAME battery runs under `GraalWasm` and
+## the sandboxed `GraalWasmWith`.
+let behavioural: { wasm_bytes: Bytes } -> Int <Wasm, Log, *>
+  = { wasm_bytes } -> do
+    let modr = Wasm.load_module { bytes = wasm_bytes, name = "arith" }
+    let a = want_int {
+      label = "add(3, 4)",
+      got = modr.call_export { name = "add", args = [from_int { val = 3 }, from_int { val = 4 }] }.int {},
+      want = 7,
+    }
+    let b = want_int {
+      label = "mul(6, 7)",
+      got = modr.call_export { name = "mul", args = [from_int { val = 6 }, from_int { val = 7 }] }.int {},
+      want = 42,
+    }
+    let c = want_int {
+      label = "sub(100, 42)",
+      got = modr.call_export { name = "sub", args = [from_int { val = 100 }, from_int { val = 42 }] }.int {},
+      want = 58,
+    }
+    # linear memory: 1 page = 65536 bytes; write a payload at offset 0 and read it back.
+    let mem = modr.get_export { name = "memory" }
+    let d = want_int { label = "memory_size (1 page)", got = mem.memory_size {}, want = 65536 }
+    let payload = bytes::from_seq { arr = [72, 105, 44, 32, 87, 65, 83, 77, 33] }
+    let e = want_ok { label = "memory_write", got = mem.memory_write { offset = 0, bytes = payload }.check {} }
+    # Read the bytes back and reduce to a hex Str BEFORE the record literal — an
+    # inline `match` in a `got =` field slot mis-parses here.
+    let read_hex = match mem.memory_read { offset = 0, length = 9 } is
+      Ok { val = rb } -> Ok { val = bytes::to_hex { b = rb } }
+      Err { error = er } -> Err { error = er }
+    let f = want_str {
+      label = "memory_read round-trip",
+      got = read_hex,
+      want = bytes::to_hex { b = payload },
+    }
+    # error-carrying producer: a missing export yields an errored foreign;
+    # coercing it must surface as Err, never crash the match.
+    let g = want_err {
+      label = "errored producer -> Err",
+      got = modr.call_export { name = "nonexistent", args = [] }.int {},
+    }
+    let s1 = int::add { l = a, r = b }
+    let s2 = int::add { l = s1, r = c }
+    let s3 = int::add { l = s2, r = d }
+    let s4 = int::add { l = s3, r = e }
+    let s5 = int::add { l = s4, r = f }
+    int::add { l = s5, r = g }
+
+let main = {} -> perform Console in perform SystemProcess in do
+  let _ = println { msg = "== mezze-wasm conformance ==" }
+  let _ = println { msg = "" }
+  let wasm_bytes = module_bytes {}
+
+  let _ = println { msg = "GraalWasm (ambient):" }
+  let ambient =
+    perform GraalWasm in do
+      behavioural { wasm_bytes = wasm_bytes }
+
+  let _ = println { msg = "" }
+  let _ = println { msg = "GraalWasmWith (sandbox boot, permissive defaults):" }
+  let sandboxed =
+    perform GraalWasmWith { config = wasm_defaults } in do
+      behavioural { wasm_bytes = wasm_bytes }
+
+  let total = int::add { l = ambient, r = sandboxed }
+  let _ = println { msg = "" }
+  if total == 0 then println { msg = "== all conformance checks passed ==" }
+  else do
+    let _ = println { msg = "== CONFORMANCE FAILED: $(int::to_str { n = total }) check(s) ==" }
+    exit { code = 1 }

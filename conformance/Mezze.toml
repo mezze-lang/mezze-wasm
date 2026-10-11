@@ -1,0 +1,23 @@
+[package]
+name = "mezze_wasm_conformance"
+version = "0.0.0"
+
+# Conformance harness for the mezze-wasm provider.
+#
+#   mez check                 # type-level conformance (runtime-free): every
+#                             # verb + the Result mirror must compile, backed
+#                             # by the toolchain's #22 foreign-kind gate.
+#   mez dev --no-watch        # behavioural conformance: arithmetic exports,
+#                             # linear-memory round-trip + a GraalWasmWith
+#                             # sandbox boot, non-zero exit on any failed check.
+[[app]]
+name = "conformance"
+path = "src/app.mz"
+entry = "main"
+
+# Depend on the provider AS IT IS in this working tree, not a pinned release.
+[path-dependencies]
+mezze-wasm = ".."
+
+# Opt in to GraalWasm so `mez dev` can run the behavioural checks.
+[polyglot.wasm]
