@@ -33,6 +33,11 @@ language      = "wasm"
 install       = "mkdir -p {dest} && for u in {packages}; do url=${u%%#*}; curl -fL --retry 3 -o {dest}/$(basename \"$url\") \"$url\"; done"
 runtime_env   = "WASM_MODULES_DIR"
 runtime_dir   = ".deps/wasm"
+# Minimum mez release this provider's generated code needs (lift, the bulk
+# scalar-seq verbs, the ScalarSequence codec hooks — all first shipped in 0.1.0).
+# `mez sync` fails loudly if the toolchain is an older RELEASE; a dev `nightly-*`
+# build skips the check. See mezze's SyncCommand toolchain handshake.
+min_toolchain = "0.1.0"
 
 # ─── Maven coordinates ─────────────────────────────────────────────
 #
